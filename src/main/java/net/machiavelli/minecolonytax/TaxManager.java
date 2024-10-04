@@ -1,74 +1,120 @@
 package net.machiavelli.minecolonytax;
 
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
 import com.minecolonies.api.colony.IColony;
-import com.minecolonies.api.colony.buildings.IBuilding;
 import net.minecraft.core.BlockPos;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import net.minecraft.server.MinecraftServer;
+import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.LogManager;
 
+import java.io.File;
+import java.io.FileWriter;
+import java.io.FileReader;
+import java.io.IOException;
+import java.lang.reflect.Type;
 import java.util.HashMap;
 import java.util.Map;
 
 public class TaxManager {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(TaxManager.class);
-    private static final Map<IColony, Integer> colonyTaxData = new HashMap<>();
-    private static final int BASE_TAX_PER_LEVEL = 10;
+    private static final Logger LOGGER = LogManager.getLogger(TaxManager.class);
+    private static final Map<Integer, Integer> colonyTaxData = new HashMap<>();
+    private static final Map<Integer, Map<BlockPos, Integer>> builtBuildings = new HashMap<>();
+    private static final String TAX_DATA_FILE = "config/minecolonytax/taxData.json";
+    private static final String BUILDING_DATA_FILE = "config/minecolonytax/builtBuildings.json";
+    private static final Gson GSON = new Gson();
 
-    // Map to track taxed buildings and their levels using BlockPos as the key
-    private static final Map<BlockPos, Integer> buildingTaxedLevels = new HashMap<>();
-
-    public static void initialize() {
+    public static void initialize(MinecraftServer server) {
         LOGGER.info("Initializing Tax Manager...");
-        //colonyTaxData.clear();
-        //buildingTaxedLevels.clear();
+        loadTaxData();
+        loadBuildingData();
     }
 
-    public static void updateTaxForBuilding(IColony colony, IBuilding building, int buildingLevel) {
-        BlockPos buildingPos = building.getPosition(); // Get the building's position
-        int lastTaxedLevel = buildingTaxedLevels.getOrDefault(buildingPos, 0);
+    public static void updateTaxForBuilding(IColony colony, BlockPos buildingPos, int buildingLevel) {
+        int colonyId = colony.getID();
+        int currentTax = colonyTaxData.getOrDefault(colonyId, 0);
+        int taxAmount = 10 * buildingLevel;
 
-        // Only update tax if the building has reached a new level
-        if (buildingLevel > lastTaxedLevel) {
-            int currentTax = colonyTaxData.getOrDefault(colony, 0);
-            int taxAmount = BASE_TAX_PER_LEVEL * (buildingLevel - lastTaxedLevel);
-            currentTax += taxAmount;
-            colonyTaxData.put(colony, currentTax);
+        currentTax += taxAmount;
+        colonyTaxData.put(colonyId, currentTax);
 
-            // Update the taxed level for this building
-            buildingTaxedLevels.put(buildingPos, buildingLevel);
+        builtBuildings.putIfAbsent(colonyId, new HashMap<>());
+        builtBuildings.get(colonyId).put(buildingPos, buildingLevel);
 
-            LOGGER.info("Updated tax for colony {}. Total tax: {}", colony.getName(), currentTax);
-        }
+        saveTaxData();
+        saveBuildingData();
+
+        LOGGER.info("Updated tax for colony {}. Total tax: {}", colony.getName(), currentTax);
+    }
+
+    public static int getStoredTaxForColony(IColony colony) {
+        return colonyTaxData.getOrDefault(colony.getID(), 0);
     }
 
 
-    // Claim tax for a colony and reset the amount
     public static int claimTax(IColony colony) {
-        int taxAmount = colonyTaxData.getOrDefault(colony, 0);
-        colonyTaxData.put(colony, 0);  // Reset tax after claim
-        LOGGER.info("Tax claimed for colony {}. Claimed amount: {}", colony.getName(), taxAmount);
+        int colonyId = colony.getID();
+        int taxAmount = colonyTaxData.getOrDefault(colonyId, 0);
+        LOGGER.info("Claiming tax for colony {}: {}", colony.getName(), taxAmount);
+        colonyTaxData.put(colonyId, 0);
+        saveTaxData();
         return taxAmount;
     }
 
-
-    public static int getTaxForColony(IColony colony) {
-        int totalTax = 0;
-
-        // Iterate through all the buildings in the colony and calculate tax
-        for (IBuilding building : colony.getBuildingManager().getBuildings().values()) {
-            // Check if the building is fully built and has no pending work orders
-            if (building.isBuilt() && !building.hasWorkOrder()) {
-                int buildingTax = 10; // Fixed tax rate per building (adjust as needed)
-                totalTax += buildingTax;
-            }
+    private static void saveTaxData() {
+        try (FileWriter writer = new FileWriter(TAX_DATA_FILE)) {
+            GSON.toJson(colonyTaxData, writer);
+            LOGGER.info("Tax data saved to file.");
+        } catch (IOException e) {
+            LOGGER.error("Error saving tax data", e);
         }
-
-        return totalTax; // Return the total calculated tax for the colony
     }
 
+    private static void loadTaxData() {
+        File taxFile = new File(TAX_DATA_FILE);
+        if (!taxFile.exists()) {
+            LOGGER.warn("No existing tax data file found at: {}", taxFile.getAbsolutePath());
+            return;
+        }
 
+        try (FileReader reader = new FileReader(taxFile)) {
+            Type taxDataType = new TypeToken<Map<Integer, Integer>>() {}.getType();
+            Map<Integer, Integer> loadedData = GSON.fromJson(reader, taxDataType);
+            if (loadedData != null) {
+                colonyTaxData.putAll(loadedData);
+                LOGGER.info("Loaded tax data from file.");
+            }
+        } catch (IOException e) {
+            LOGGER.error("Error loading tax data", e);
+        }
+    }
 
+    private static void saveBuildingData() {
+        try (FileWriter writer = new FileWriter(BUILDING_DATA_FILE)) {
+            GSON.toJson(builtBuildings, writer);
+            LOGGER.info("Building data saved to file.");
+        } catch (IOException e) {
+            LOGGER.error("Error saving building data", e);
+        }
+    }
 
+    private static void loadBuildingData() {
+        File buildingFile = new File(BUILDING_DATA_FILE);
+        if (!buildingFile.exists()) {
+            LOGGER.warn("No existing building data file found at: {}", buildingFile.getAbsolutePath());
+            return;
+        }
 
+        try (FileReader reader = new FileReader(buildingFile)) {
+            Type buildingDataType = new TypeToken<Map<Integer, Map<BlockPos, Integer>>>() {}.getType();
+            Map<Integer, Map<BlockPos, Integer>> loadedData = GSON.fromJson(reader, buildingDataType);
+            if (loadedData != null) {
+                builtBuildings.putAll(loadedData);
+                LOGGER.info("Loaded building data from file.");
+            }
+        } catch (IOException e) {
+            LOGGER.error("Error loading building data", e);
+        }
+    }
 }
