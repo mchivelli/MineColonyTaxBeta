@@ -44,8 +44,9 @@ public class ColonyEventListener {
                 if (!buildingLevels.containsKey(building) || buildingLevels.get(building) < currentLevel) {
                     LOGGER.info("Detected new or upgraded building: {} at level {} in colony {}", building.getBuildingDisplayName(), currentLevel, colony.getName());
 
+
                     // Update tax based on new or upgraded building
-                    TaxManager.updateTaxForBuilding(colony, building.getPosition(), currentLevel);
+                    TaxManager.updateTaxForBuilding(colony, currentLevel);
 
                     // Update the tracked building level
                     buildingLevels.put(building, currentLevel);
