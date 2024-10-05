@@ -6,6 +6,7 @@ import com.google.gson.reflect.TypeToken;
 import com.minecolonies.api.IMinecoloniesAPI;
 import com.minecolonies.api.colony.IColony;
 import com.minecolonies.api.colony.IColonyManager;
+import com.minecolonies.api.colony.buildings.IBuilding;
 import net.minecraft.server.MinecraftServer;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
@@ -26,20 +27,26 @@ import java.util.Map;
 @Mod.EventBusSubscriber
 public class TaxManager {
 
+    private static final Map<Integer, Integer> colonyTaxMap = new HashMap<>();
     private static final Logger LOGGER = LogManager.getLogger(TaxManager.class);
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final Map<Integer, Integer> colonyTaxData = new HashMap<>();
     private static final String TAX_DATA_FILE = "config/colonyTaxData.json";
     private static MinecraftServer serverInstance;
-    private static int tickCount = 0;  // Keep track of ticks
+
+    // Tick interval for generating taxes (default 1 hour)
+    private static long ticksPerInterval = 72000L;
 
     // Initialize Tax Manager
     public static void initialize(MinecraftServer server) {
         LOGGER.info("Initializing Tax Manager...");
         serverInstance = server;
-        loadTaxData(server);  // Load tax data on server start
 
-        // Register to handle ticks for generating tax every minute (1200 ticks)
+        // Load tax data on server start
+        loadTaxData(server);
+
+        // Register to handle ticks for generating tax
+        ticksPerInterval = TaxConfig.getTaxIntervalInMinutes() * 1200L; // Calculate interval based on config
         MinecraftForge.EVENT_BUS.register(new TickEventHandler());
     }
 
@@ -52,13 +59,13 @@ public class TaxManager {
 
     // Inner class for handling tick events
     public static class TickEventHandler {
+        private static int tickCount = 0;  // Keep track of ticks
+
         @SubscribeEvent
         public void onServerTick(TickEvent.ServerTickEvent event) {
             if (event.phase == TickEvent.Phase.END) {
                 tickCount++;
-                // Generate tax based on interval set in config
-                int taxIntervalInTicks = TaxConfig.getTaxIntervalInMinutes() * 1200;
-                if (tickCount >= taxIntervalInTicks) {
+                if (tickCount >= ticksPerInterval) {
                     TaxManager.generateTaxesForAllColonies();
                     tickCount = 0;  // Reset the tick counter
                 }
@@ -66,58 +73,78 @@ public class TaxManager {
         }
     }
 
-    // Generate taxes for all colonies every interval
+    public static int claimTax(IColony colony) {
+        int colonyId = colony.getID();
+        int claimedTax = colonyTaxMap.getOrDefault(colonyId, 0);
+
+        if (claimedTax > 0) {
+            // Set the tax to zero after claiming
+            colonyTaxMap.put(colonyId, 0);
+            LOGGER.info("Claimed {} tax for colony {}", claimedTax, colony.getName());
+
+            // Save changes to file
+            saveTaxData();
+        } else {
+            LOGGER.info("No tax available to claim for colony {}", colony.getName());
+        }
+
+        return claimedTax;
+    }
+
+    // Method to get stored tax for a colony
+    public static int getStoredTaxForColony(IColony colony) {
+        return colonyTaxMap.getOrDefault(colony.getID(), 0);
+    }
+
+    // Method to increment tax revenue for a colony
+    public static void incrementTaxRevenue(IColony colony, int taxAmount) {
+        int currentTax = colonyTaxMap.getOrDefault(colony.getID(), 0);
+        colonyTaxMap.put(colony.getID(), currentTax + taxAmount);
+    }
+
+    // Generate taxes for all colonies
     public static void generateTaxesForAllColonies() {
         if (serverInstance != null) {
             serverInstance.getAllLevels().forEach(world -> {
                 IColonyManager colonyManager = IMinecoloniesAPI.getInstance().getColonyManager();
                 colonyManager.getColonies(world).forEach(colony -> {
-                    int buildingCount = colony.getBuildingManager().getBuildings().size();
-                    int generatedTax = buildingCount * 5; // Example: Generate 5 tax per building.
-                    incrementTaxRevenue(colony, generatedTax);
-                    LOGGER.info("Generated {} tax for colony {}", generatedTax, colony.getName());
+                    for (IBuilding building : colony.getBuildingManager().getBuildings().values()) {
+                        String buildingType = building.getBuildingDisplayName(); // Get the display name of the building
+                        int buildingLevel = building.getBuildingLevel();
 
-                    // Immediately save the updated tax data
-                    saveTaxData();
+                        double baseTax = TaxConfig.getBaseTaxForBuilding(buildingType);
+                        double upgradeTax = TaxConfig.getUpgradeTaxForBuilding(buildingType) * buildingLevel;
+
+                        int generatedTax = (int) (baseTax + upgradeTax);
+
+                        // Update tax for the colony
+                        incrementTaxRevenue(colony, generatedTax);
+
+                        LOGGER.info("Generated {} tax for building {} (level {}) in colony {}", generatedTax, buildingType, buildingLevel, colony.getName());
+                    }
                 });
             });
+
+            // Save tax data to persist changes
+            saveTaxData();
         }
     }
 
-    // Update tax for a building when a new level is reached
-    public static void updateTaxForBuilding(IColony colony, int buildingLevel) {
-        int colonyId = colony.getID();
-        int currentTax = colonyTaxData.getOrDefault(colonyId, 0);
-        int taxAmount = 10 * buildingLevel;  // Example: Tax is 10 per building level
+    // Method to update the tax when a new building is constructed or upgraded
+    public static void updateTaxForBuilding(IColony colony, IBuilding building, int currentLevel) {
+        String buildingType = building.getBuildingDisplayName(); // Get the display name of the building
 
-        currentTax += taxAmount;
-        colonyTaxData.put(colonyId, currentTax);
+        double baseTax = TaxConfig.getBaseTaxForBuilding(buildingType);
+        double upgradeTax = TaxConfig.getUpgradeTaxForBuilding(buildingType) * currentLevel;
 
-        // Immediately save the updated tax data to ensure persistence
-        saveTaxData();
-        LOGGER.info("Updated tax for colony {}. Total tax now: {}", colony.getName(), currentTax);
+        int totalTax = (int) (baseTax + upgradeTax);
+
+        // Update tax for the colony
+        incrementTaxRevenue(colony, totalTax);
+
+        LOGGER.info("Generated {} tax for building {} (level {}) in colony {}", totalTax, buildingType, currentLevel, colony.getName());
     }
 
-    // Retrieve the stored tax amount for a colony
-    public static int getStoredTaxForColony(IColony colony) {
-        return colonyTaxData.getOrDefault(colony.getID(), 0);
-    }
-
-    // Claim the tax for a colony and reset it to zero
-    public static int claimTax(IColony colony) {
-        int colonyId = colony.getID();
-        int taxAmount = colonyTaxData.getOrDefault(colonyId, 0);
-
-        if (taxAmount > 0) {
-            colonyTaxData.put(colonyId, 0); // Reset the tax after claiming
-            saveTaxData(); // Save updated tax data to file
-            LOGGER.info("Claimed tax for colony {}. Amount claimed: {}", colony.getName(), taxAmount);
-        } else {
-            LOGGER.info("No tax available to claim for colony {}", colony.getName());
-        }
-
-        return taxAmount;
-    }
 
     // Save tax data to a JSON file
     private static void saveTaxData() {
@@ -142,17 +169,9 @@ public class TaxManager {
                 }
             } catch (IOException e) {
                 LOGGER.error("Error loading tax data", e);
-            } catch (Exception e) {
-                LOGGER.error("Unexpected error while parsing tax data. Please check the file format.", e);
             }
         } else {
             LOGGER.info("No existing tax data file found at: {}", taxFile.getAbsolutePath());
         }
-    }
-
-    // Increment tax revenue for a colony
-    private static void incrementTaxRevenue(IColony colony, int taxAmount) {
-        int currentTax = colonyTaxData.getOrDefault(colony.getID(), 0);
-        colonyTaxData.put(colony.getID(), currentTax + taxAmount);
     }
 }
